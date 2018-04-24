@@ -1,0 +1,215 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Los datos del estudio son:
+```{r}
+costatotal <- read.table("~/Desktop/costatotal.txt", header = TRUE)
+costatotal <- costatotal[,-1]
+costatotal$cof <- factor(costatotal$cof)
+costatotal$rumbcat <- factor(costatotal$rumbcat)
+head(costatotal)
+```
+
+
+Cargamos el mapa de Galicia:
+```{r}
+library(rgdal)
+setwd("~/Downloads/")
+galicia_shp <- readOGR(dsn="Concellos", layer="Concellos_IGN")
+```
+```{r}
+plot(galicia_shp)
+```
+
+Obtenemos los códigos postales de las regiones costeras de Galicia:
+```{r}
+regiones_costa <- read.table("~/Downloads/codes.txt", header = TRUE)
+(regiones_costa <- regiones_costa$CODIGO)
+class(regiones_costa)
+```
+
+Seleccionamos las regiones costeras de nuestro mapa de Galicia:
+```{r}
+mapcoast <- galicia_shp[galicia_shp@data$CodCONC%in%regiones_costa,]
+plot(mapcoast)
+```
+
+Comprobamos la estructura de vecindad:
+```{r}
+library(spdep)
+codigos <- mapcoast@data$CodCONC
+nbcoast <- poly2nb(mapcoast, queen = FALSE, row.names = codigos)
+```
+
+```{r}
+nbcoast
+codigos
+mapcoast@data$CodCONC
+```
+
+```{r}
+plot(nbcoast, coordinates(mapcoast))
+```
+Vemos que hay dos puntos desconectados, dividiendo el mapa en dos.
+
+Los dos concellos deconectados son 15072 y 36010, con índices:
+```{r}
+cp <- attr(nbcoast, "region.id")
+which(cp==36010)
+which(cp==15072)
+```
+```{r}
+nbcoast[34]
+addedneighbour[34]
+nbcoast[24]
+addedneighbour[24]
+```
+
+Para añadir el link entre estos dos concellos:
+```{r}
+new_nb <- nbcoast
+new_nb[[34]] <- sort(c(new_nb[[34]], 24))
+new_nb[[24]] <- sort(c(new_nb[[24]], 34))
+```
+
+
+```{r}
+library(R2BayesX)
+gracoast <- nb2gra(new_nb)
+diag(gracoast)
+```
+
+```{r}
+bnd <- sp2bnd(mapcoast, height2width = c(1,2))
+plot(bnd)
+```
+
+
+```{r}
+M <- bayesx(mus ~ sx(cof, bs="mrf", map=gracoast), data=costatotal,
+       family="poisson", method="REML")
+```
+
+
+```{r}
+summary(M)
+```
+
+```{r}
+plot(M, term = "sx(cof):mrf")
+```
+
+```{r}
+str(M)
+```
+
+```{r}
+r_effects <- M$effects$`sx(cof):mrf`
+r_effects <- r_effects[,1:2]
+r_effects
+```
+
+```{r}
+library(broom)
+costa_df <- tidy(mapcoast)
+head(costa_df)
+```
+
+```{r}
+shp2df <- function(i) {
+        df <- data.frame(mapcoast@polygons[[i]]@Polygons[[1]]@coords)
+        df$CP <- mapcoast$CodCONC[i]
+        names(df) <- c("long", "lat", "region")
+        return(df)
+}
+coast_df <- lapply(1:49, shp2df)
+coast_df <- do.call("rbind", coast_df)
+coast_df$region <- factor(coast_df$region)
+str(coast_df)
+```
+```{r}
+mapcoast@polygons[[1]]@plotOrder
+```
+
+
+
+
+```{r}
+costa_df$id <- factor(costa_df$id)
+str(costa_df)
+```
+
+
+
+```{r}
+ggplot(costa_df, aes(x=long, y=lat, group = group)) +
+        geom_polygon()
+```
+
+
+```{r}
+obs <- costa_df %>%
+                group_by(id) %>%
+                summarise(n = length(id))
+
+ef <- rep(r_effects$Estimate, obs$n)
+spat_df <- data.frame(costa_df, ef)
+spat_df
+```
+
+```{r}
+ggplot(spat_df, aes(x=long, y=lat)) +
+        geom_polygon(mapping = aes(fill=ef, group=group)) +
+        scale_fill_gradientn(colors=c("brown3", "navajowhite1", "skyblue3")) +
+        labs(x=NULL, y=NULL) +
+        theme(panel.border=element_blank()) +
+        theme(panel.background=element_blank()) +
+        theme(axis.ticks=element_blank()) +
+        theme(axis.text=element_blank()) +
+        theme(panel.grid.major=element_blank()) +
+        theme(panel.grid.minor=element_blank()) +
+        labs(fill="Effect") +
+        coord_equal()
+```
+
+```{r}
+plot_spatial_str <- function(mod, map) {
+        library(dplyr)
+        r_effects <- mod$effects$`sx(cof):mrf`
+        r_effects <- r_effects[,1:2]
+        obs <- map %>%
+                group_by(id) %>%
+                summarise(n = length(id))
+        ef <- rep(r_effects$Estimate, obs$n)
+        spat_df <- data.frame(costa_df, ef)
+        p <- ggplot(spat_df, aes(x=long, y=lat)) +
+                geom_polygon(mapping = aes(fill=ef, group=group)) +
+                scale_fill_gradientn(colors=c("brown3", "navajowhite1", "skyblue3")) +
+                labs(x=NULL, y=NULL) +
+                theme(panel.border=element_blank()) +
+                theme(panel.background=element_blank()) +
+                theme(axis.ticks=element_blank()) +
+                theme(axis.text=element_blank()) +
+                theme(panel.grid.major=element_blank()) +
+                theme(panel.grid.minor=element_blank()) +
+                labs(fill="Effect") +
+                coord_equal()
+        return(p)
+}
+```
+
+```{r}
+plot_spatial_str(M, costa_df)
+```
+
+```{r}
+setwd("~/Desktop/")
+shp <- readOGR(dsn = "datos_mapas", layer = "Galicia")
+```
+
+```{r}
+costa <- shp[shp@data$CODIGO%in%regiones_costa,]
+plot(costa)
+```
+
