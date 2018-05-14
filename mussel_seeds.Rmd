@@ -38,16 +38,19 @@ galicia_map$CODIGO <- as.factor(as.character(galicia_map$CODIGO))
 ```{r}
 coast_codes <- read.table("codes.txt", header = TRUE)
 coast_codes
-coast_map <- filter(galicia_map, CODIGO %in% coast_codes$CODIGO)
-plot(coast_map)
-plot(coast_map[1])
+coast_map_sf <- filter(galicia_map, CODIGO %in% unique(coast_codes$CODIGO)) %>% 
+        .[-33,]
+# There seems to be two regions with code 36006 (Cambados)
+
+plot(coast_map_sf)
+plot(coast_map_sf[1])
 ```
 
 
 ```{r}
-class(coast_map$CODIGO)
+class(coast_map_sf$CODIGO)
 class(costatotal$cof)
-coast_mussel_sf <- left_join(coast_map, costatotal, by = c(CODIGO = "cof"))
+coast_mussel_sf <- left_join(coast_map_sf, costatotal, by = c(CODIGO = "cof"))
 ```
 
 ```{r}
@@ -56,19 +59,101 @@ mus_per_code <- select(costatotal, mus, cof) %>%
         group_by(cof) %>% 
         summarise(mus = median(mus))
 mus_per_code
-muss_sf <- left_join(coast_map, mus_per_code, by = c(CODIGO = "cof"))
+muss_sf <- left_join(coast_map_sf, mus_per_code, by = c(CODIGO = "cof"))
 plot(muss_sf["mus"])
 ```
 
+
 ```{r}
-library(lme4)
-glmer(mus ~ scale(rumbo) + scale(bar) + (1|cof), family = poisson(), data = costatotal)
+neighbours <- st_intersects(muss_sf, muss_sf)
+as.nb <- function(x, ...) {
+        attrs <- attributes(x)
+        x <- lapply(x, function(i) {if (length(i) == 0L) 0L else i})
+        attributes(x) <- attrs
+        class(x) <- "nb"
+        x
+}
+nb_sf <- as.nb(neighbours)
+names(nb_sf) <- muss_sf$CODIGO
+nb_sf
 ```
 
 
 ```{r}
+centroids_sf <- st_centroid(coast_map_sf)
+centroids_coords <- st_coordinates(centroids_sf)
+```
+
+```{r}
+centroids_coords <- st_centroid(coast_map_sf) %>% 
+        st_coordinates() %>% 
+        as.data.frame() %>% 
+        mutate(codigo = coast_map_sf$CODIGO)
+```
+
+```{r}
+library(spdep)
+plot(nb_sf, centroids_coords[,-3])
+idx <- centroids_coords$codigo %in% c("15030", "15072", "36010", "15005")
+disconected_points <- centroids_coords[idx,]
+text(disconected_points[,-3], labels = disconected_points$codigo, cex = 0.7, pos = 4)
+```
+
+```{r}
+# Add links to disconected points
+codigos_missing <- which(idx == TRUE)
+add_link <- function(nb, i, j) {
+        nb[[i]] <- sort(unique(c(nb[[i]], j)))
+        nb[[j]] <- sort(unique(c(nb[[j]], i)))
+        nb
+}
+nb_added_link <- add_link(nb_sf, codigos_missing[1], codigos_missing[2])
+nb_added_link <- add_link(nb_added_link, codigos_missing[3], codigos_missing[4])
+plot(nb_added_link, centroids_coords[,-3])
+```
+
+```{r}
+polygons_coords <- st_coordinates(coast_map_sf)
+polys_list <- split(polygons_coords, as.factor(polygons_coords[,4]))
+names(polys_list) <- coast_map_sf$CODIGO
+```
+
+```{r}
+library(mgcv)
+gam(mus ~ potseed + s(cof, bs = "mrf", xt = list(nb = nb_added_link)), data = costatotal, drop.unused.levels = FALSE)
+```
+
+```{r}
+df <- select(costatotal, mus, seed, bar, rumbo, potseed, potper)
+pairs(df)
+```
+
+
+```{r}
+lmer(mus ~ potseed + (alt|CODIGO), data = coast_mussel_sf)
+```
+
+```{r}
+library(R2BayesX)
+library(BayesXsrc)
+gracoast <- nb2gra(nb_added_link)
+M <- bayesx(mus ~ sx(cof, bs="mrf", map=gracoast), data=costatotal,
+       family="poisson", method="REML")
+```
+
+
+```{r}
+library(lme4)
+glmer(mus ~ scale(rumbo) + scale(bar) + (1|cof), family = poisson(), data = coast_mussel_sf)
+```
+
+```{r}
+
+```
+
+```{r}
 library(brms)
-brm(mus ~ potseed + (1|cof), data = costatotal, family = zero_inflated_negbinomial())
+#brm(mus ~ potseed + (1|cof), data = costatotal, family = zero_inflated_negbinomial())
 ```
 
 
@@ -101,16 +186,20 @@ st_intersection(coast_map, coast_map)
 ```{r}
 library(spdep)
 coast_nb <- poly2nb(as(coast_map, "Spatial"), queen = TRUE)
-plot(coast_nb)
+coast_nb
 ```
 
 
 ```{r}
 library(rgdal)
-setwd("~/Downloads/")
-galicia_shp <- readOGR(dsn="Concellos", layer="Concellos_IGN")
+galicia_shp <- readOGR(dsn=".", layer="Galicia")
 ```
 ```{r}
+plot(galicia_shp)
+```
+
+```{r}
+galicia_shp@data <- galicia_shp@data[-280,]
 plot(galicia_shp)
 ```
 
@@ -123,21 +212,27 @@ class(regiones_costa)
 
 Seleccionamos las regiones costeras de nuestro mapa de Galicia:
 ```{r}
-mapcoast <- galicia_shp[galicia_shp@data$CodCONC%in%regiones_costa,]
-plot(mapcoast)
+coast_map <- galicia_shp[galicia_shp@data$CODIGO %in% regiones_costa,]
+#mapcoast <- galicia_shp[galicia_shp@data$CodCONC%in%regiones_costa,]
+plot(coast_map)
 ```
 
 Comprobamos la estructura de vecindad:
 ```{r}
 library(spdep)
-codigos <- mapcoast@data$CodCONC
-nbcoast <- poly2nb(mapcoast, queen = FALSE, row.names = codigos)
+codes <- coast_map@data$CODIGO
+#codigos <- mapcoast@data$CodCONC
+nbcoast <- poly2nb(coast_map, queen = TRUE, row.names = unique(regiones_costa))
 ```
 
 ```{r}
 nbcoast
 codigos
 mapcoast@data$CodCONC
+```
+
+```{r}
+
 ```
 
 ```{r}
